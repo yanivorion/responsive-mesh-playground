@@ -120,6 +120,19 @@ const RESPONSIVE_BEHAVIORS = {
   wrap: { label: 'Wrap', heightUnit: 'auto', widthUnit: 'spx' }
 };
 
+// Default margin (top / left) unit per responsive behavior. The rule is
+// straightforward: an element that scales with the canvas wants margins
+// that scale too, while every other behavior (fixed, relative-width, wrap,
+// cellFit, hug, stretch …) wants pixel-locked margins so the element
+// docks at a stable distance from its parent corner.
+//   scaleProportionally → spx
+//   everything else      → px
+// `setMarginUnit` is still available if the user wants `pct` for an
+// individual element, but defaults follow this rule everywhere.
+function defaultMarginUnit(behaviorKey) {
+  return behaviorKey === 'scaleProportionally' ? 'spx' : 'px';
+}
+
 // Section-level responsive packages. Govern how the section height behaves
 // across canvas widths. Mesh mode defaults to `auto`, which grows with content
 // and uses `minEmpty` as a floor when the section has no children.
@@ -667,6 +680,7 @@ function Component({ config = {} }) {
               : beh.heightUnit === 'auto'
               ? baseH
               : pxToUnit(baseH, beh.heightUnit, refWidth, canvasWidth);
+          const marginUnit = defaultMarginUnit(behaviorKey);
           const newEl = {
             id: newId,
             archetype,
@@ -674,9 +688,9 @@ function Component({ config = {} }) {
             parentCell: null,
             parentEl: target.containerId,
             anchorId: null,
-            topUnit: 'pct',
+            topUnit: marginUnit,
             topValue: 0,
-            leftUnit: 'pct',
+            leftUnit: marginUnit,
             leftValue: 0,
             wValue,
             hValue,
@@ -699,6 +713,7 @@ function Component({ config = {} }) {
               : beh.heightUnit === 'auto'
               ? baseH
               : pxToUnit(baseH, beh.heightUnit, refWidth, canvasWidth);
+          const marginUnit = defaultMarginUnit(behaviorKey);
           const newEl = {
             id: newId,
             archetype,
@@ -706,9 +721,9 @@ function Component({ config = {} }) {
             parentCell: target.cellIndex,
             parentEl: null,
             anchorId: null,
-            topUnit: 'spx',
+            topUnit: marginUnit,
             topValue: 0,
-            leftUnit: 'spx',
+            leftUnit: marginUnit,
             leftValue: 0,
             wValue,
             hValue,
@@ -730,7 +745,8 @@ function Component({ config = {} }) {
             : pxToUnit(baseH, beh.heightUnit, refWidth, canvasWidth);
 
         let anchorId = null;
-        const topUnit = 'spx';
+        const marginUnit = defaultMarginUnit(behaviorKey);
+        const topUnit = marginUnit;
         let topValue = pxToUnit(top, topUnit, refWidth, canvasWidth);
 
         if (mode === 'mesh') {
@@ -743,7 +759,7 @@ function Component({ config = {} }) {
           }
         }
 
-        const leftUnit = 'spx';
+        const leftUnit = marginUnit;
         const leftValue = pxToUnit(left, leftUnit, refWidth, canvasWidth);
 
         const newEl = {
@@ -1427,7 +1443,30 @@ function Component({ config = {} }) {
               beh.heightUnit === 'auto' || beh.heightUnit === 'pct'
                 ? heightPx
                 : pxToUnit(heightPx, beh.heightUnit, refWidth, canvasWidth);
-            return { ...c, behavior: behaviorKey, wValue, hValue };
+            // Snap margin units to the rule for the new behavior, preserving
+            // the on-screen position at the current canvas size. The user
+            // can still override per-axis from the inspector afterwards.
+            const newMarginUnit = defaultMarginUnit(behaviorKey);
+            const parentH = lo?.parentEl
+              ? (laid.find((l) => l.id === lo.parentEl)?.heightPx || canvasWidth)
+              : canvasWidth;
+            const parentW = lo?.parentEl
+              ? (laid.find((l) => l.id === lo.parentEl)?.widthPx || canvasWidth)
+              : canvasWidth;
+            const topPxNow = unitToPx(c.topValue, c.topUnit, refWidth, canvasWidth, parentH);
+            const leftPxNow = unitToPx(c.leftValue, c.leftUnit, refWidth, canvasWidth, parentW);
+            const topValue = pxToUnit(topPxNow, newMarginUnit, refWidth, canvasWidth, parentH);
+            const leftValue = pxToUnit(leftPxNow, newMarginUnit, refWidth, canvasWidth, parentW);
+            return {
+              ...c,
+              behavior: behaviorKey,
+              wValue,
+              hValue,
+              topUnit: newMarginUnit,
+              leftUnit: newMarginUnit,
+              topValue,
+              leftValue
+            };
           })
         };
       })
@@ -1818,17 +1857,15 @@ function Component({ config = {} }) {
             ? 100
             : pxToUnit(hPx, beh.heightUnit, ref, ref, parentH);
 
-        // Position units mirror addElement(): cell drops use spx local offsets,
-        // container drops use pct of the parent box, free drops use spx of the
-        // section/canvas.
-        const topUnit = parentEl ? 'pct' : 'spx';
-        const leftUnit = parentEl ? 'pct' : 'spx';
-        const topValue = parentEl
-          ? (yPx / Math.max(1, parentH)) * 100
-          : pxToUnit(yPx, topUnit, ref, ref, parentW);
-        const leftValue = parentEl
-          ? (xPx / Math.max(1, parentW)) * 100
-          : pxToUnit(xPx, leftUnit, ref, ref, parentW);
+        // Margin unit follows the global rule: scaleProportionally → spx,
+        // everything else → px. The spec's x/y are treated as design-time
+        // pixels at refWidth, so converting at refWidth gives the same
+        // numeric value for px and 1× for spx (since canvas == ref here).
+        const marginUnit = defaultMarginUnit(behKey);
+        const topUnit = marginUnit;
+        const leftUnit = marginUnit;
+        const topValue = pxToUnit(yPx, topUnit, ref, ref, parentH);
+        const leftValue = pxToUnit(xPx, leftUnit, ref, ref, parentW);
 
         let anchorId = null;
         if (c.anchor) {
