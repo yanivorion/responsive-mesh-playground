@@ -1,0 +1,11 @@
+node_modules
+dist
+.DS_Store
+*.log
+.vite
+.cache
+.env
+.env.*
+
+# Local archives kept in the workspace but not source-controlled.
+*.zip
