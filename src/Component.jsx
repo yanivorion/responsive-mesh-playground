@@ -112,7 +112,6 @@ const RESPONSIVE_BEHAVIORS = {
   fixedHeight: { label: 'Fixed Height', heightUnit: 'px', widthUnit: 'vw' },
   stretch: { label: 'Stretch', heightUnit: 'pct', widthUnit: 'pct' },
   hug: { label: 'Hug', heightUnit: 'auto', widthUnit: 'auto' },
-  cellFit: { label: 'Cell Fit', heightUnit: 'auto', widthUnit: 'pct' },
   // Wrap = "fluid width, content height". Width scales proportionally with
   // the canvas (forcing text to re-wrap), height grows to fit content. For
   // text this means the bounding box grows in height as the content wraps;
@@ -123,7 +122,7 @@ const RESPONSIVE_BEHAVIORS = {
 // Default margin (top / left) unit per responsive behavior. The rule is
 // straightforward: an element that scales with the canvas wants margins
 // that scale too, while every other behavior (fixed, relative-width, wrap,
-// cellFit, hug, stretch …) wants pixel-locked margins so the element
+// hug, stretch …) wants pixel-locked margins so the element
 // docks at a stable distance from its parent corner.
 //   scaleProportionally → spx
 //   everything else      → px
@@ -147,7 +146,7 @@ const ARCHETYPES = {
     label: 'Container',
     icon: '◻︎',
     color: '#3b82f6',
-    behaviors: ['scaleProportionally', 'relativeWidth', 'fixed', 'stretch', 'cellFit', 'wrap'],
+    behaviors: ['scaleProportionally', 'relativeWidth', 'fixed', 'stretch', 'wrap'],
     defaultBehavior: 'scaleProportionally',
     defaultSize: { w: 320, h: 180 }
   },
@@ -163,7 +162,7 @@ const ARCHETYPES = {
     label: 'Text',
     icon: 'T',
     color: '#7c3aed',
-    behaviors: ['scaleProportionally', 'fixed', 'hug', 'cellFit', 'wrap'],
+    behaviors: ['scaleProportionally', 'fixed', 'hug', 'wrap'],
     defaultBehavior: 'wrap',
     defaultSize: { w: 320, h: 80 }
   },
@@ -414,9 +413,16 @@ function Component({ config = {} }) {
   const [showGridlines, setShowGridlines] = React.useState(
     config?.showGridlinesByDefault === true || config?.showGridlinesByDefault === 'true'
   );
+  // When false, hide all section editing chrome — the dashed/solid section
+  // outlines, the "Section N" badge, the Select / Layout / × toolbar, the
+  // bottom resize handle, and any hover/select tints — leaving just the
+  // rendered content. Useful for previewing a layout as a "real" page or
+  // capturing a clean screenshot. Click selection still works against the
+  // backdrop, so interaction is preserved.
+  const [showSectionChrome, setShowSectionChrome] = React.useState(true);
   const [randomIntensity, setRandomIntensity] = React.useState(3);
 
-  const [sections, setSections] = React.useState(() => [createSection({ height: 480 })]);
+  const [sections, setSections] = React.useState(() => [createSection({ height: 630 })]);
   const [selected, setSelected] = React.useState(null);
   const [draggingWidget, setDraggingWidget] = React.useState(null);
   const draggingWidgetRef = React.useRef(null);
@@ -428,8 +434,28 @@ function Component({ config = {} }) {
   const elementRefs = React.useRef(new Map());
   const cellRefs = React.useRef(new Map());
   const sectionRefs = React.useRef(new Map());
-  const [, forceTick] = React.useState(0);
+  // Natural (content-driven) heights for text/button elements, keyed by
+  // element id. This lets text always hug its wrapped content even when its
+  // responsive package specifies a frozen height (spx / px / pct) — the
+  // resolved heightPx in `layoutChildren` is grown to max(spec, natural) so
+  // siblings anchored below stack correctly. We track it in a side ref
+  // instead of the spec so the inspector keeps showing the user's choice.
+  const naturalHeightsRef = React.useRef(new Map());
+  const [tick, forceTick] = React.useState(0);
   const bumpTick = React.useCallback(() => forceTick((n) => (n + 1) | 0), []);
+  const setNaturalHeight = React.useCallback((id, hPx) => {
+    if (id == null) return;
+    const cur = naturalHeightsRef.current.get(id);
+    if (hPx == null || hPx <= 0) {
+      if (cur == null) return;
+      naturalHeightsRef.current.delete(id);
+      bumpTick();
+      return;
+    }
+    if (cur != null && Math.abs(cur - hPx) < 1) return;
+    naturalHeightsRef.current.set(id, hPx);
+    bumpTick();
+  }, [bumpTick]);
 
   const registerElementRef = React.useCallback((id, node) => {
     if (node) elementRefs.current.set(id, node);
@@ -451,7 +477,7 @@ function Component({ config = {} }) {
 
   // ---------- helpers ----------
 
-  function createSection({ height = 480, behavior } = {}) {
+  function createSection({ height = 630, behavior } = {}) {
     const beh = behavior || (mode === 'mesh' ? 'auto' : 'fixedHeight');
     const sb = SECTION_BEHAVIORS[beh];
     const hUnit = sb.hUnit;
@@ -468,13 +494,14 @@ function Component({ config = {} }) {
 
   const layoutSections = React.useMemo(() => {
     let yCursor = 0;
+    const natural = naturalHeightsRef.current;
     return sections.map((sec) => {
       const sb = SECTION_BEHAVIORS[sec.behavior] || SECTION_BEHAVIORS.fixedHeight;
       const isAuto = sb.hUnit === 'auto';
       const heightPx = isAuto
         ? 0
         : unitToPx(sec.hValue, sec.hUnit, refWidth, canvasWidth, canvasWidth);
-      const minHeight = computeContentMinHeight(sec, canvasWidth, refWidth, mode);
+      const minHeight = computeContentMinHeight(sec, canvasWidth, refWidth, mode, natural);
       const minEmpty = isAuto ? sb.minEmpty || 240 : 0;
       const baseHeight = Math.max(heightPx, minHeight, minEmpty);
       // Auto sections grow with content; dragging the bottom handle adds extra
@@ -485,12 +512,15 @@ function Component({ config = {} }) {
         topPx: yCursor,
         heightPx: finalHeight,
         widthPx: canvasWidth,
-        children: layoutChildren(sec, canvasWidth, refWidth, finalHeight, mode)
+        children: layoutChildren(sec, canvasWidth, refWidth, finalHeight, mode, natural)
       };
       yCursor += finalHeight;
       return out;
     });
-  }, [sections, canvasWidth, refWidth, mode]);
+    // `tick` is bumped whenever a natural height changes; without it React
+    // would memoize on the stale Map identity and miss content reflows.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sections, canvasWidth, refWidth, mode, tick]);
 
   const totalCanvasHeight = layoutSections.reduce((acc, s) => acc + s.heightPx, 0);
 
@@ -651,7 +681,11 @@ function Component({ config = {} }) {
     // Pick behavior. When dropping into a cell or container, fit to the parent.
     let behaviorKey;
     if (intoCell || intoContainer) {
-      if (archetype === 'text' || archetype === 'container') behaviorKey = 'cellFit';
+      // Text + container drops snap to `wrap` (fluid spx width, content
+      // height) so the new element grows with its content while still
+      // scaling with the canvas. Images stay on `stretch` so they fill
+      // the cell/parent both ways by default.
+      if (archetype === 'text' || archetype === 'container') behaviorKey = 'wrap';
       else if (archetype === 'image') behaviorKey = 'stretch';
       else behaviorKey = arche.defaultBehavior;
     } else {
@@ -1474,8 +1508,118 @@ function Component({ config = {} }) {
   }
 
   function clearAll() {
-    setSections([createSection({ height: 480 })]);
+    setSections([createSection({ height: 630 })]);
     setSelected(null);
+  }
+
+  // ── Bulk behavior presets ─────────────────────────────────────────────────────
+  // Two one-click actions that sweep the entire stage and rewrite every
+  // element's responsive behavior + margin unit consistently.
+  //
+  //   applyAllScaleProportionally — every element → 'scaleProportionally',
+  //     every margin → 'spx'. The classic "everything scales with viewport
+  //     width" demo. Handy for showing students how a 1280-only design behaves
+  //     under naive proportional scaling.
+  //
+  //   applyResponsivePreset — opinionated "smart responsive" recipe:
+  //     text       → 'wrap'           (fluid width, content height; re-wraps)
+  //     button     → 'relativeWidth'  (width scales spx, height fixed px)
+  //     container  → 'relativeWidth'
+  //     image      → 'relativeWidth'
+  //   Margins follow `defaultMarginUnit(newBehavior)` (px for all of these,
+  //   so the elements dock at stable pixel offsets while their internal
+  //   widths flex). Together this approximates a real-world mobile-first
+  //   page: text reflows, blocks shrink width-wise, button heights stay
+  //   touch-friendly.
+  //
+  // Both helpers preserve current ON-SCREEN geometry: widths/heights and
+  // margins are rewritten in the new units so the visible pixel position at
+  // the current canvas size is unchanged. Only the SCALING behavior under a
+  // future canvas resize changes.
+  function applyBehaviorToAll(getBehavior, opts = {}) {
+    const { marginUnit = null } = opts;
+    setSections((prev) =>
+      prev.map((sec) => {
+        const laid = layoutChildren(sec, canvasWidth, refWidth, sec.hValue, mode);
+        const tpl = sec.layout && sec.layout !== 'free' ? GRID_TEMPLATES[sec.layout] : null;
+        const sectionH = unitToPx(sec.hValue, sec.hUnit, refWidth, canvasWidth, canvasWidth);
+        return {
+          ...sec,
+          children: sec.children.map((c) => {
+            if (!c.archetype || !ARCHETYPES[c.archetype]) return c;
+            const newBehavior = getBehavior(c);
+            if (!newBehavior) return c;
+            if (!ARCHETYPES[c.archetype].behaviors.includes(newBehavior)) return c;
+            const lo = laid.find((l) => l.id === c.id);
+            const beh = RESPONSIVE_BEHAVIORS[newBehavior];
+
+            // Resolve parent size for percent-aware unit conversion. Mirrors
+            // `getMarginParentSize` so the rewrite matches the existing
+            // single-element flow exactly.
+            let parentW = canvasWidth;
+            let parentH = sectionH > 0 ? sectionH : canvasWidth;
+            if (c.parentEl) {
+              const p = laid.find((x) => x.id === c.parentEl);
+              if (p) {
+                parentW = p.widthPx;
+                parentH = p.heightPx;
+              }
+            } else if (c.parentCell != null && tpl?.cells) {
+              const cell = tpl.cells[c.parentCell];
+              if (cell) {
+                parentW = cell.w * canvasWidth;
+                parentH = cell.h * (sectionH > 0 ? sectionH : canvasWidth);
+              }
+            }
+
+            const widthPx = lo?.widthPx ?? c.wValue;
+            const heightPx = lo?.heightPx ?? c.hValue;
+            const wValue =
+              beh.widthUnit === 'auto' || beh.widthUnit === 'pct'
+                ? widthPx
+                : pxToUnit(widthPx, beh.widthUnit, refWidth, canvasWidth, parentW);
+            const hValue =
+              beh.heightUnit === 'auto' || beh.heightUnit === 'pct'
+                ? heightPx
+                : pxToUnit(heightPx, beh.heightUnit, refWidth, canvasWidth, parentH);
+
+            const newMarginUnit = marginUnit || defaultMarginUnit(newBehavior);
+
+            // Preserve visible margins by reinterpreting them into the new
+            // unit at the current canvas size.
+            const leftPxCurrent = unitToPx(c.leftValue, c.leftUnit, refWidth, canvasWidth, parentW);
+            const topPxCurrent = unitToPx(c.topValue, c.topUnit, refWidth, canvasWidth, parentH);
+            const leftValue = pxToUnit(leftPxCurrent, newMarginUnit, refWidth, canvasWidth, parentW);
+            const topValue = pxToUnit(topPxCurrent, newMarginUnit, refWidth, canvasWidth, parentH);
+
+            return {
+              ...c,
+              behavior: newBehavior,
+              wValue,
+              hValue,
+              leftUnit: newMarginUnit,
+              leftValue,
+              topUnit: newMarginUnit,
+              topValue
+            };
+          })
+        };
+      })
+    );
+  }
+
+  function applyAllScaleProportionally() {
+    applyBehaviorToAll(() => 'scaleProportionally', { marginUnit: 'spx' });
+  }
+
+  function applyResponsivePreset() {
+    const map = {
+      text: 'wrap',
+      button: 'relativeWidth',
+      container: 'relativeWidth',
+      image: 'relativeWidth'
+    };
+    applyBehaviorToAll((c) => map[c.archetype] || null);
   }
 
   // ── Randomize behaviors across stage ─────────────────────────────────────────
@@ -2112,6 +2256,8 @@ function Component({ config = {} }) {
         onCanvasWidthChange={setCanvasWidth}
         showGridlines={showGridlines}
         onToggleGridlines={() => setShowGridlines((v) => !v)}
+        showSectionChrome={showSectionChrome}
+        onToggleSectionChrome={() => setShowSectionChrome((v) => !v)}
         onClear={clearAll}
         onImport={() => { setImportError(''); setParsedLayouts(null); setShowImport(true); }}
         onOpenLibrary={() => setShowLibrary(true)}
@@ -2119,6 +2265,8 @@ function Component({ config = {} }) {
         randomIntensity={randomIntensity}
         onRandomIntensityChange={setRandomIntensity}
         onRandomize={() => randomizeBehaviors(randomIntensity)}
+        onApplyAllSpx={applyAllScaleProportionally}
+        onApplyResponsivePreset={applyResponsivePreset}
         accent={accent}
       />
 
@@ -2171,6 +2319,7 @@ function Component({ config = {} }) {
           sections={layoutSections}
           mode={mode}
           showGridlines={showGridlines}
+          showSectionChrome={showSectionChrome}
           accent={accent}
           dropTarget={dropTarget}
           selected={selected}
@@ -2188,6 +2337,7 @@ function Component({ config = {} }) {
           onRemoveSection={removeSection}
           onSetSectionLayout={setSectionLayout}
           onMeasureHeight={setMeasuredHeight}
+          onMeasureNaturalHeight={setNaturalHeight}
           onUpdateElementProps={updateElementProps}
           onRegisterElementRef={registerElementRef}
           onRegisterCellRef={registerCellRef}
@@ -2225,7 +2375,20 @@ function Component({ config = {} }) {
 }
 
 // ─── Layout pipeline ────────────────────────────────────────────────────────────
-function layoutChildren(sec, canvasWidth, refWidth, sectionHeightHint, mode = 'mesh') {
+//
+// `naturalHeights` (optional Map<id, px>) carries content-measured heights
+// for text/button elements. When present, the resolved heightPx for those
+// archetypes is grown to `max(spec, natural)` so anchored siblings stack
+// below the *rendered* bottom (not the spec'd bottom) and the bounding box
+// matches the wrapped content. Containers grow via their child bounding box
+// further down; images/containers ignore the natural map.
+function layoutChildren(sec, canvasWidth, refWidth, sectionHeightHint, mode = 'mesh', naturalHeights = null) {
+  const hugContent = (c, h) => {
+    if (!naturalHeights) return h;
+    if (c.archetype !== 'text' && c.archetype !== 'button') return h;
+    const nat = naturalHeights.get(c.id);
+    return nat != null && nat > h ? nat : h;
+  };
   // Use the live rendered section height when provided so `pct` height
   // ("Stretch") fills the actual section vertically. Fall back to the stored
   // hValue (used during the initial content-min computation pass).
@@ -2256,7 +2419,7 @@ function layoutChildren(sec, canvasWidth, refWidth, sectionHeightHint, mode = 'm
         : beh.widthUnit === 'pct'
         ? canvasWidth
         : unitToPx(c.wValue, beh.widthUnit, refWidth, canvasWidth, canvasWidth);
-    const heightPx =
+    const heightPxRaw =
       beh.heightUnit === 'auto'
         ? c.hValue
         : beh.heightUnit === 'pct'
@@ -2264,12 +2427,15 @@ function layoutChildren(sec, canvasWidth, refWidth, sectionHeightHint, mode = 'm
           ? sectionHeight
           : c.hValue
         : unitToPx(c.hValue, beh.heightUnit, refWidth, canvasWidth, canvasWidth);
+    const heightPx = hugContent(c, heightPxRaw);
     const leftPx = unitToPx(c.leftValue, c.leftUnit, refWidth, canvasWidth, canvasWidth);
     const topOffset = unitToPx(c.topValue, c.topUnit, refWidth, canvasWidth, canvasWidth);
     const anchor = useMesh && c.anchorId ? byId[c.anchorId] : null;
     const topPx = anchor ? anchor.topPx + anchor.heightPx + topOffset : topOffset;
     // Free children are positioned in section coordinates, so their
-    // section-absolute coords equal their leftPx/topPx.
+    // section-absolute coords equal their leftPx/topPx. `topOffsetPx` is
+    // stashed so the post-bubble cascade (below) can recompute topPx
+    // against the FINAL anchor height without redoing unit conversion.
     const computed = {
       ...c,
       leftPx,
@@ -2278,7 +2444,8 @@ function layoutChildren(sec, canvasWidth, refWidth, sectionHeightHint, mode = 'm
       heightPx,
       absLeftPx: leftPx,
       absTopPx: topPx,
-      cellRect: null
+      cellRect: null,
+      topOffsetPx: topOffset
     };
     byId[c.id] = computed;
     out.push(computed);
@@ -2310,12 +2477,13 @@ function layoutChildren(sec, canvasWidth, refWidth, sectionHeightHint, mode = 'm
             : beh.widthUnit === 'pct'
             ? cellW
             : unitToPx(c.wValue, beh.widthUnit, refWidth, canvasWidth, cellW);
-        const heightPx =
+        const heightPxRaw =
           beh.heightUnit === 'auto'
             ? c.hValue
             : beh.heightUnit === 'pct'
             ? cellH
             : unitToPx(c.hValue, beh.heightUnit, refWidth, canvasWidth, cellH);
+        const heightPx = hugContent(c, heightPxRaw);
         const leftPx =
           cellDef.x * canvasWidth +
           unitToPx(c.leftValue, c.leftUnit, refWidth, canvasWidth, cellW);
@@ -2342,7 +2510,9 @@ function layoutChildren(sec, canvasWidth, refWidth, sectionHeightHint, mode = 'm
           heightPx,
           absLeftPx: leftPx,
           absTopPx: topPx,
-          cellRect: { x: cellDef.x * canvasWidth, y: cellDef.y * sectionHeight, w: cellW, h: cellH }
+          cellRect: { x: cellDef.x * canvasWidth, y: cellDef.y * sectionHeight, w: cellW, h: cellH },
+          topOffsetPx: topOffset,
+          cellAnchorTopPx: cellDef.y * sectionHeight
         };
         byId[c.id] = computed;
         out.push(computed);
@@ -2381,12 +2551,13 @@ function layoutChildren(sec, canvasWidth, refWidth, sectionHeightHint, mode = 'm
           : beh.widthUnit === 'pct'
           ? parentLaid.widthPx
           : unitToPx(c.wValue, beh.widthUnit, refWidth, canvasWidth, parentLaid.widthPx);
-      const heightPx =
+      const heightPxRaw =
         beh.heightUnit === 'auto'
           ? c.hValue
           : beh.heightUnit === 'pct'
           ? parentLaid.heightPx
           : unitToPx(c.hValue, beh.heightUnit, refWidth, canvasWidth, parentLaid.heightPx);
+      const heightPx = hugContent(c, heightPxRaw);
       const relLeftPx = unitToPx(c.leftValue, c.leftUnit, refWidth, canvasWidth, parentLaid.widthPx);
       const topOffset = unitToPx(c.topValue, c.topUnit, refWidth, canvasWidth, parentLaid.heightPx);
       // Mesh inside the container: anchor must be a sibling with the same
@@ -2414,7 +2585,8 @@ function layoutChildren(sec, canvasWidth, refWidth, sectionHeightHint, mode = 'm
         heightPx,
         absLeftPx,
         absTopPx,
-        cellRect: null
+        cellRect: null,
+        topOffsetPx: topOffset
       };
       byId[c.id] = computed;
       out.push(computed);
@@ -2422,43 +2594,119 @@ function layoutChildren(sec, canvasWidth, refWidth, sectionHeightHint, mode = 'm
     pending = next;
   }
 
-  // Auto-height containers grow to enclose their parented children. We do
-  // this AFTER the main layout pass so child positions are settled, then
-  // re-iterate (deepest first via reverse order) to let nested containers
-  // bubble their grown height up. A small bottom padding mirrors the
+  // Containers always hug their parented children. We do this AFTER
+  // the main layout pass so child positions are settled, then re-iterate
+  // (deepest first via reverse order) to let nested containers bubble
+  // their resolved height up. A small bottom padding mirrors the
   // section's content-min behaviour.
+  //
+  // Rules:
+  //   - With children → height = (bounding box of children) + PAD.
+  //     The container's selected responsive heightUnit is ignored on this
+  //     axis: containers are bounding-box wrappers, like Figma Auto
+  //     Layout. The responsive package still controls width.
+  //   - Empty container →
+  //       heightUnit === 'auto'  → small placeholder floor (80px).
+  //       any other unit         → respect the configured height so
+  //                                designers can stage an empty box at
+  //                                a deliberate size.
+  // ── Convergence loop: container-bubble + anchor-cascade ───────────────
+  // Two coupled passes that must run together until stable:
+  //
+  //   bubble:   each container's heightPx grows to fit its child bounding
+  //             box (children may have already hugged taller via the
+  //             natural-height side-channel). PAD adds a small bottom
+  //             gutter, mirroring section content-min behavior.
+  //   cascade:  every anchored element re-reads `byId[anchor]` so chains
+  //             like A → B → C propagate when B's height (or B's parent's
+  //             height) just grew. Then absTopPx is re-derived from
+  //             topPx + parent.absTopPx so container descendants follow
+  //             a moved container.
+  //
+  // These feed each other: a cascade-induced topPx shift inside a
+  // container changes that container's max-bottom, which then re-bubbles,
+  // which then re-cascades downstream siblings. The combined loop runs
+  // until neither pass mutates anything.
   const PAD = 16;
-  let bubble = true;
-  let bubbleSafety = 6;
-  while (bubble && bubbleSafety-- > 0) {
-    bubble = false;
+  for (let outer = 0; outer < 12; outer++) {
+    let dirty = false;
+
+    // Bubble: containers fit their content (deepest first via reverse
+    // iteration so nested containers settle inside-out).
     for (let i = out.length - 1; i >= 0; i--) {
       const cont = out[i];
       if (cont.archetype !== 'container') continue;
       const cBeh = RESPONSIVE_BEHAVIORS[cont.behavior];
-      if (cBeh.heightUnit !== 'auto') continue;
       let maxBottom = 0;
+      let hasChild = false;
       for (const child of out) {
         if (child.parentEl !== cont.id) continue;
+        hasChild = true;
         const b = (child.topPx || 0) + (child.heightPx || 0);
         if (b > maxBottom) maxBottom = b;
       }
-      const newH = maxBottom > 0 ? maxBottom + PAD : Math.max(cont.heightPx || 0, 80);
-      if (Math.abs((cont.heightPx || 0) - newH) > 0.5) {
+      const currentH = cont.heightPx || 0;
+      let newH;
+      if (hasChild) {
+        newH = maxBottom + PAD;
+      } else if (cBeh.heightUnit === 'auto') {
+        newH = Math.max(currentH, 80);
+      } else {
+        newH = currentH;
+      }
+      if (Math.abs(currentH - newH) > 0.5) {
         cont.heightPx = newH;
-        // Cascade: any descendant whose `parentEl` chain leads through this
-        // container does not need re-positioning (their relative positions
-        // are unchanged), but the container's own absolute height changed.
-        bubble = true;
+        dirty = true;
       }
     }
+
+    // Cascade: anchored elements read the latest anchor.heightPx +
+    // anchor.topPx and recompute their topPx using the stored offset.
+    if (useMesh) {
+      for (const c of out) {
+        if (!c.anchorId) continue;
+        const anchor = byId[c.anchorId];
+        if (!anchor) continue;
+        const sameScope =
+          (c.parentEl ? anchor.parentEl === c.parentEl : !anchor.parentEl) &&
+          (c.parentCell != null
+            ? anchor.parentCell === c.parentCell
+            : anchor.parentCell == null);
+        if (!sameScope) continue;
+        const offset = c.topOffsetPx || 0;
+        const newTop = anchor.topPx + anchor.heightPx + offset;
+        if (Math.abs(newTop - c.topPx) > 0.5) {
+          c.topPx = newTop;
+          dirty = true;
+        }
+      }
+    }
+
+    // Re-derive absTopPx so container descendants follow their parent and
+    // free / cell children stay in sync with their (possibly moved) topPx.
+    for (const c of out) {
+      let newAbsTop;
+      if (c.parentEl) {
+        const parent = byId[c.parentEl];
+        if (!parent) continue;
+        newAbsTop = parent.absTopPx + c.topPx;
+      } else {
+        newAbsTop = c.topPx;
+      }
+      if (Math.abs(newAbsTop - (c.absTopPx ?? 0)) > 0.5) {
+        c.absTopPx = newAbsTop;
+        dirty = true;
+      }
+    }
+
+    if (!dirty) break;
   }
 
   return out;
 }
 
-function computeContentMinHeight(sec, canvasWidth, refWidth, mode = 'mesh') {
-  const laid = layoutChildren(sec, canvasWidth, refWidth, sec.hValue, mode);
+function computeContentMinHeight(sec, canvasWidth, refWidth, mode = 'mesh', naturalHeights = null) {
+  const laid = layoutChildren(sec, canvasWidth, refWidth, sec.hValue, mode, naturalHeights);
   let max = 0;
   for (const c of laid) {
     // Use section-absolute coords because parented children's leftPx/topPx
@@ -2956,6 +3204,8 @@ function TopBar({
   onCanvasWidthChange,
   showGridlines,
   onToggleGridlines,
+  showSectionChrome,
+  onToggleSectionChrome,
   onClear,
   onImport,
   onOpenLibrary,
@@ -2963,6 +3213,8 @@ function TopBar({
   randomIntensity,
   onRandomIntensityChange,
   onRandomize,
+  onApplyAllSpx,
+  onApplyResponsivePreset,
   accent
 }) {
   return (
@@ -3048,6 +3300,13 @@ function TopBar({
       <TBtn onClick={onToggleGridlines} dark={showGridlines}>
         {showGridlines ? 'Hide Gridlines' : 'Show Gridlines'}
       </TBtn>
+      <TBtn
+        onClick={onToggleSectionChrome}
+        dark={!showSectionChrome}
+        title="Toggle section partition strokes, the Section N badges, and the section toolbar. Click selection still works when chrome is hidden."
+      >
+        {showSectionChrome ? 'Hide Sections' : 'Show Sections'}
+      </TBtn>
       <TBtn onClick={onOpenLibrary} dark>
         Library{typeof libraryCount === 'number' ? ` (${libraryCount})` : ''}
       </TBtn>
@@ -3092,6 +3351,43 @@ function TopBar({
         </div>
         <TBtn onClick={onRandomize} dark>
           Randomize
+        </TBtn>
+      </div>
+
+      {/* Bulk behavior presets — one-click sweeps that rewrite every
+          element's responsive package. Sit next to Randomize so the user
+          can compare an opinionated preset against a randomised mix
+          without leaving the toolbar. */}
+      <div
+        title="Apply a bulk responsive preset to every element on stage. All SPX = scale-proportionally with spx margins (everything scales with viewport). Smart = text wraps, buttons / containers / images use relative width with px margins."
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 6,
+          padding: '4px 8px 4px 10px',
+          height: 32,
+          background: 'rgba(255,255,255,0.45)',
+          border: `1px solid ${T.ctrlBorder}`,
+          borderRadius: 10,
+          boxShadow: T.inner
+        }}
+      >
+        <span
+          style={{
+            fontSize: 9,
+            fontWeight: 700,
+            letterSpacing: '0.10em',
+            textTransform: 'uppercase',
+            color: T.text3
+          }}
+        >
+          Apply
+        </span>
+        <TBtn onClick={onApplyAllSpx} title="Set every element to Scale Proportionally with spx margins">
+          All SPX
+        </TBtn>
+        <TBtn onClick={onApplyResponsivePreset} title="Text → Wrap. Buttons / containers / images → Relative Width.">
+          Smart
         </TBtn>
       </div>
 
@@ -3143,24 +3439,34 @@ function resolveSpecAbsolutes(section) {
   return out;
 }
 
-function ThumbItem({ item, scale }) {
-  const { archetype, props = {}, left, top, width, height } = item;
+// Renders one V14 spec child as its REAL widget (text/image/button/container)
+// at refWidth coordinates. The parent <LayoutThumbnail/> wraps everything in
+// a single CSS `transform: scale(width / refWidth)` so the entire layout is
+// rendered exactly once, full-fidelity, then visually shrunk by the GPU —
+// the same trick Webflow / Framer use for their template gallery cards.
+function ThumbItem({ item }) {
+  const { archetype, props = {}, left, top, width, height, id } = item;
   const baseStyle = {
     position: 'absolute',
-    left: left * scale,
-    top: top * scale,
-    width: Math.max(1, width * scale),
-    height: Math.max(1, height * scale),
-    pointerEvents: 'none'
+    left,
+    top,
+    width,
+    height,
+    pointerEvents: 'none',
+    boxSizing: 'border-box'
   };
 
   if (archetype === 'image') {
-    // Same placeholder pool as the canvas, so a thumbnail visually
-    // matches what the layout will render once loaded.
-    const seed = (props.src || item.id || `${left}.${top}.${width}.${height}`);
+    const seed = props.src || id || `${left}.${top}.${width}.${height}`;
     const src = pickPlaceholder(seed);
     return (
-      <div style={{ ...baseStyle, overflow: 'hidden', borderRadius: 2, background: '#f4f4f5' }}>
+      <div style={{
+        ...baseStyle,
+        overflow: 'hidden',
+        borderRadius: props.borderRadius != null ? +props.borderRadius : 8,
+        background: '#f4f4f5',
+        boxShadow: 'inset 0 0 0 1px rgba(0,0,0,0.05)'
+      }}>
         <img
           src={src}
           alt=""
@@ -3179,67 +3485,70 @@ function ThumbItem({ item, scale }) {
   }
 
   if (archetype === 'button') {
-    const primary = props.variant !== 'ghost' && props.variant !== 'secondary';
-    const radius = props.radius != null
-      ? Math.min((+props.radius || 0) * scale, baseStyle.height / 2)
-      : Math.min(baseStyle.height / 2, 4);
+    const variant = props.variant || 'primary';
+    const isPrimary = variant === 'primary';
+    const radius = props.radius ?? 8;
+    const padX = props.paddingX ?? 18;
+    const padY = props.paddingY ?? 10;
     return (
-      <div style={{
-        ...baseStyle,
-        background: primary ? '#0f172a' : 'transparent',
-        border: primary ? 'none' : '1px solid #0f172a',
-        borderRadius: radius,
-        opacity: 0.92
-      }} />
+      <div style={{ ...baseStyle, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <div style={{
+          width: '100%',
+          height: '100%',
+          padding: `${padY}px ${padX}px`,
+          border: isPrimary ? 'none' : '1px solid #e4e4e7',
+          borderRadius: radius,
+          background: isPrimary ? (props.background || '#0f172a') : (props.background || '#fafafa'),
+          color: isPrimary ? (props.color || '#ffffff') : (props.color || '#52525b'),
+          fontFamily: props.fontFamily || sysFont,
+          fontSize: 13,
+          fontWeight: 500,
+          letterSpacing: '0.01em',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          boxSizing: 'border-box',
+          whiteSpace: 'nowrap',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis'
+        }}>
+          {props.label || 'Start Now'}
+        </div>
+      </div>
     );
   }
 
   if (archetype === 'container') {
-    const bg = props.background && props.background !== 'transparent'
-      ? props.background : 'transparent';
-    const bc = props.borderColor && props.borderColor !== 'transparent'
-      ? props.borderColor : 'rgba(15,23,42,0.10)';
+    const hasBg = props.background && props.background !== 'transparent';
+    const hasBorder = props.borderColor && props.borderColor !== 'transparent';
     return (
       <div style={{
         ...baseStyle,
-        background: bg,
-        border: `1px solid ${bc}`,
-        borderRadius: props.borderRadius != null
-          ? Math.max(0, (+props.borderRadius || 0) * scale)
-          : 2
+        background: hasBg ? props.background : 'transparent',
+        border: hasBorder ? `${props.borderWidth || 1}px solid ${props.borderColor}` : 'none',
+        borderRadius: props.borderRadius != null ? +props.borderRadius : 0,
+        boxShadow: props.boxShadow || 'none'
       }} />
     );
   }
 
-  // text → stacked bars approximating wrapped lines
-  const fontSize = +props.fontSize || 14;
-  const lh = parseFloat(props.lineHeight) || 1.45;
-  const lineBoxPx = fontSize * lh;
-  const lines = Math.max(1, Math.round(height / lineBoxPx));
-  const isHeading = fontSize >= 28;
-  const isEyebrow = fontSize <= 12 && (props.letterSpacing || '').toString().includes('em');
-  const barColor = isHeading ? '#0f172a' : (isEyebrow ? '#a1a1aa' : '#52525b');
-  const barOpacity = isHeading ? 0.88 : (isEyebrow ? 0.55 : 0.42);
-  const barH = Math.max(1, fontSize * 0.50 * scale);
-  const gap = Math.max(1, (lineBoxPx - fontSize * 0.50) * scale);
-  const align = props.textAlign === 'center' ? 'center'
-    : props.textAlign === 'right' ? 'flex-end' : 'flex-start';
-
+  // text — render the literal content with its real font/size/weight/colour.
   return (
-    <div style={{ ...baseStyle, display: 'flex', flexDirection: 'column', alignItems: align }}>
-      {Array.from({ length: lines }).map((_, j) => {
-        const isLastShort = lines > 1 && j === lines - 1;
-        return (
-          <div key={j} style={{
-            height: barH,
-            marginTop: j === 0 ? 0 : gap,
-            background: barColor,
-            opacity: barOpacity,
-            width: isLastShort ? '62%' : '100%',
-            borderRadius: 1
-          }} />
-        );
-      })}
+    <div style={{
+      ...baseStyle,
+      padding: '2px 4px',
+      fontFamily: props.fontFamily || 'Inter, system-ui, sans-serif',
+      fontSize: (props.fontSize || 16) + 'px',
+      fontWeight: props.fontWeight || 400,
+      color: props.color || '#0f172a',
+      lineHeight: props.lineHeight || 1.5,
+      letterSpacing: props.letterSpacing || '0em',
+      textAlign: props.textAlign || 'left',
+      overflow: 'hidden',
+      wordBreak: 'break-word',
+      whiteSpace: 'normal'
+    }}>
+      {props.text}
     </div>
   );
 }
@@ -3274,26 +3583,42 @@ function LayoutThumbnail({ spec, width = 260 }) {
     <div style={{
       width, height,
       position: 'relative',
-      background: '#fafafa',
+      background: '#ffffff',
       borderRadius: 6,
       overflow: 'hidden'
     }}>
-      {spec.sections.map((sec, i) => {
-        const rect = rects[i];
-        const items = resolveSpecAbsolutes(sec);
-        return (
-          <div key={i} style={{
-            position: 'absolute',
-            left: 0, top: rect.y * scale,
-            width: '100%',
-            height: rect.h * scale,
-            overflow: 'hidden',
-            background: i % 2 === 1 ? '#f4f4f5' : '#fafafa'
-          }}>
-            {items.map((it, j) => (<ThumbItem key={j} item={it} scale={scale} />))}
-          </div>
-        );
-      })}
+      {/* Render the entire layout at full reference size, then scale the
+          whole tree once. The browser handles font hinting, image cover,
+          rounded corners, etc. natively — the thumbnail is a faithful
+          miniature of what the canvas will show. */}
+      <div style={{
+        position: 'absolute',
+        top: 0,
+        left: 0,
+        width: refW,
+        height: totalH,
+        transform: `scale(${scale})`,
+        transformOrigin: 'top left',
+        pointerEvents: 'none'
+      }}>
+        {spec.sections.map((sec, i) => {
+          const rect = rects[i];
+          const items = resolveSpecAbsolutes(sec);
+          return (
+            <div key={i} style={{
+              position: 'absolute',
+              left: 0,
+              top: rect.y,
+              width: refW,
+              height: rect.h,
+              overflow: 'hidden',
+              background: '#ffffff'
+            }}>
+              {items.map((it, j) => (<ThumbItem key={j} item={it} />))}
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -3873,7 +4198,10 @@ function WidgetRail({ onDragStart, onDragEnd, accent }) {
     <aside
       style={{
         borderRight: `1px solid ${T.border}`,
-        background: '#fafaf9',
+        background: 'rgba(255,255,255,0.42)',
+        backdropFilter: T.blur,
+        WebkitBackdropFilter: T.blur,
+        boxShadow: T.inner,
         display: 'flex',
         flexDirection: 'column',
         alignItems: 'center',
@@ -3912,8 +4240,10 @@ function RailTile({ widgetKey, widget, accent, onDragStart, onDragEnd }) {
         width: 44,
         height: 44,
         borderRadius: 10,
-        background: hover ? '#fff' : 'transparent',
-        border: `1px solid ${hover ? T.border2 : 'transparent'}`,
+        background: hover ? T.glassStrong : 'transparent',
+        backdropFilter: hover ? T.blur : undefined,
+        WebkitBackdropFilter: hover ? T.blur : undefined,
+        border: `1px solid ${hover ? T.glassBorder : 'transparent'}`,
         display: 'flex',
         flexDirection: 'column',
         alignItems: 'center',
@@ -3921,7 +4251,7 @@ function RailTile({ widgetKey, widget, accent, onDragStart, onDragEnd }) {
         gap: 2,
         transition: `all 200ms ${EASE.out}`,
         userSelect: 'none',
-        boxShadow: hover ? '0 2px 8px rgba(0,0,0,0.06)' : 'none',
+        boxShadow: hover ? `${T.shadow}, ${T.inner}` : 'none',
         color: hover ? accent : T.text2
       }}
     >
@@ -4081,7 +4411,7 @@ function MoveableController({ sec, el, accent, onMoveableDrag, onMoveableResize,
       const baseH = e0.heightPx;
       // Read the latest behavior — beh in the outer closure is captured at
       // first render and may be stale if the user changed the responsive
-      // package. For auto-height behaviors (wrap, hug, cellFit), the gesture
+      // package. For auto-height behaviors (wrap, hug), the gesture
       // must NOT lock the DOM height: we let the box auto-grow vertically
       // as the content (text) re-wraps under the new width, and we mirror
       // that real height onto the selection overlay.
@@ -4198,11 +4528,11 @@ function MoveableController({ sec, el, accent, onMoveableDrag, onMoveableResize,
         width: HSIZE,
         height: HSIZE,
         background: '#fff',
-        border: `2px solid ${accent}`,
+        border: `1.5px solid ${accent}`,
         borderRadius: '50%',
         boxSizing: 'border-box',
         pointerEvents: 'auto',
-        boxShadow: '0 1px 3px rgba(0,0,0,0.18)',
+        boxShadow: '0 1px 3px rgba(15,23,42,0.10), 0 0 0 2px rgba(255,255,255,0.6)',
         cursor,
         touchAction: 'none',
         ...extra
@@ -4250,7 +4580,10 @@ function MoveableController({ sec, el, accent, onMoveableDrag, onMoveableResize,
         zIndex: 10,
         outline: `1.5px solid ${accent}`,
         outlineOffset: 0,
-        boxSizing: 'border-box'
+        // Soft accent halo per design guide (T.accentGlow)
+        boxShadow: '0 0 0 3px rgba(59,130,246,0.14)',
+        boxSizing: 'border-box',
+        borderRadius: 4
       }}
     >
       {handles}
@@ -4289,6 +4622,7 @@ function CanvasArea({
   sections,
   mode,
   showGridlines,
+  showSectionChrome = true,
   accent,
   dropTarget,
   selected,
@@ -4307,6 +4641,7 @@ function CanvasArea({
   onSetSectionLayout,
   onUpdateElementProps,
   onMeasureHeight,
+  onMeasureNaturalHeight,
   onRegisterElementRef,
   onRegisterCellRef,
   onRegisterSectionRef,
@@ -4380,8 +4715,8 @@ function CanvasArea({
             height: totalHeight,
             background: '#ffffff',
             border: `1px solid ${T.border}`,
-            borderRadius: 12,
-            boxShadow: T.shadow,
+            borderRadius: 14,
+            boxShadow: `${T.shadow}, ${T.inner}`,
             overflow: 'visible'
           }}
         >
@@ -4394,6 +4729,7 @@ function CanvasArea({
               canRemove={sections.length > 1}
               mode={mode}
               showGridlines={showGridlines}
+              showChrome={showSectionChrome}
               accent={accent}
               canvasWidth={canvasWidth}
               refWidth={refWidth}
@@ -4408,6 +4744,7 @@ function CanvasArea({
               onSetSectionLayout={onSetSectionLayout}
               onUpdateElementProps={onUpdateElementProps}
               onMeasureHeight={onMeasureHeight}
+              onMeasureNaturalHeight={onMeasureNaturalHeight}
               onRegisterElementRef={onRegisterElementRef}
               onRegisterCellRef={onRegisterCellRef}
               onRegisterSectionRef={onRegisterSectionRef}
@@ -4461,6 +4798,7 @@ function SectionView({
   canRemove,
   mode,
   showGridlines,
+  showChrome = true,
   accent,
   canvasWidth,
   refWidth,
@@ -4475,6 +4813,7 @@ function SectionView({
   onSetSectionLayout,
   onUpdateElementProps,
   onMeasureHeight,
+  onMeasureNaturalHeight,
   onRegisterElementRef,
   onRegisterCellRef,
   onRegisterSectionRef
@@ -4494,6 +4833,11 @@ function SectionView({
     return () => onRegisterSectionRef && onRegisterSectionRef(sec.id, null);
   }, [onRegisterSectionRef, sec.id]);
 
+  // Outer wrapper carries the section's exact bounds + ref (for snap
+  // guidelines) but does NOT clip. Real content lives inside `inner`, which
+  // does clip — so child elements that extend past the section are masked,
+  // while the bottom resize handle and "+ Add Section" button (which sit
+  // below the section's bottom edge) stay visible.
   return (
     <div
       ref={sectionRefSetter}
@@ -4505,25 +4849,37 @@ function SectionView({
         top: sec.topPx,
         width: sec.widthPx,
         height: sec.heightPx,
-        // Clip to the section's box so children that extend past it
-        // (negative coords / x+w > section width / y+h > section height)
-        // are masked at the edge instead of bleeding into adjacent
-        // sections or beyond the canvas — matches real-site behavior.
-        overflow: 'hidden',
-        background: isSelected
-          ? 'rgba(59,130,246,0.018)'
-          : hover
-          ? 'rgba(15,23,42,0.012)'
-          : 'transparent',
-        outline: isSelected
-          ? `2px solid ${accent}`
-          : hover
-          ? `1px solid ${T.text3}`
-          : `1px dashed rgba(15,23,42,0.18)`,
-        outlineOffset: -1,
-        transition: `background 200ms ${EASE.out}, outline-color 200ms ${EASE.out}`
+        overflow: 'visible'
       }}
     >
+      {/* Inner clipping box — the visible section surface that masks any
+          children that extend past its edges. */}
+      <div
+        style={{
+          position: 'absolute',
+          inset: 0,
+          overflow: 'hidden',
+          // When section chrome is hidden we drop the partition stroke +
+          // tints entirely so the canvas reads as a continuous page.
+          // Click-selection still works against the backdrop below.
+          background: !showChrome
+            ? 'transparent'
+            : isSelected
+            ? 'rgba(59,130,246,0.018)'
+            : hover
+            ? 'rgba(15,23,42,0.012)'
+            : 'transparent',
+          outline: !showChrome
+            ? 'none'
+            : isSelected
+            ? `2px solid ${accent}`
+            : hover
+            ? `1px solid ${T.text3}`
+            : `1px dashed rgba(15,23,42,0.10)`,
+          outlineOffset: -1,
+          transition: `background 200ms ${EASE.out}, outline-color 200ms ${EASE.out}`
+        }}
+      >
       {/* Click-to-select backdrop (sits behind cells / elements) */}
       <div
         onClick={(e) => {
@@ -4538,29 +4894,32 @@ function SectionView({
         }}
       />
       {/* Top-edge selection rail — always reachable, even over grid cells */}
-      <div
-        onClick={(e) => {
-          e.stopPropagation();
-          onSelectSection(sec.id);
-        }}
-        title="Select section"
-        style={{
-          position: 'absolute',
-          top: 0,
-          left: 0,
-          right: 0,
-          height: 6,
-          zIndex: 6,
-          cursor: 'pointer',
-          background: isSelected
-            ? accent
-            : hover
-            ? 'rgba(59,130,246,0.18)'
-            : 'transparent',
-          transition: `background 200ms ${EASE.out}`
-        }}
-      />
+      {showChrome && (
+        <div
+          onClick={(e) => {
+            e.stopPropagation();
+            onSelectSection(sec.id);
+          }}
+          title="Select section"
+          style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            right: 0,
+            height: 6,
+            zIndex: 6,
+            cursor: 'pointer',
+            background: isSelected
+              ? accent
+              : hover
+              ? 'rgba(59,130,246,0.18)'
+              : 'transparent',
+            transition: `background 200ms ${EASE.out}`
+          }}
+        />
+      )}
       {/* Section index badge — clickable selector, sits above cells */}
+      {showChrome && (
       <button
         onClick={(e) => {
           e.stopPropagation();
@@ -4569,43 +4928,69 @@ function SectionView({
         title="Select section"
         style={{
           position: 'absolute',
-          top: 8,
-          left: 0,
+          top: 10,
+          left: 10,
           zIndex: 6,
-          padding: '4px 9px',
+          padding: '4px 10px',
           fontSize: 9,
           fontWeight: 700,
           letterSpacing: '0.10em',
           textTransform: 'uppercase',
           color: isSelected ? '#fff' : T.text2,
-          background: isSelected ? accent : '#fff',
-          border: `1px solid ${isSelected ? accent : T.border2}`,
-          borderLeft: 'none',
-          borderRadius: '0 6px 6px 0',
-          boxShadow: '0 1px 3px rgba(0,0,0,0.06)',
+          background: isSelected ? accent : T.glassStrong,
+          backdropFilter: T.blur,
+          WebkitBackdropFilter: T.blur,
+          border: `1px solid ${isSelected ? accent : T.glassBorder}`,
+          borderRadius: 999,
+          boxShadow: isSelected
+            ? '0 2px 10px rgba(59,130,246,0.30)'
+            : '0 1px 2px rgba(15,23,42,0.04)',
           fontFamily: sysFont,
           cursor: 'pointer',
           transition: `all 200ms ${EASE.out}`,
-          pointerEvents: 'auto'
+          pointerEvents: 'auto',
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 7
         }}
       >
-        Section {index + 1}
+        <span>Section {index + 1}</span>
+        {/* Live size readout — visible when the section is hovered or
+            selected so the user always sees the current W×H while resizing
+            the bottom handle or dragging the canvas-width slider. */}
+        {(active || isSelected) && (
+          <span
+            style={{
+              fontWeight: 600,
+              letterSpacing: '0.04em',
+              opacity: isSelected ? 0.78 : 0.62,
+              borderLeft: `1px solid ${isSelected ? 'rgba(255,255,255,0.40)' : 'rgba(15,23,42,0.18)'}`,
+              paddingLeft: 7
+            }}
+          >
+            {Math.round(sec.widthPx)} × {Math.round(sec.heightPx)}
+          </span>
+        )}
       </button>
+      )}
 
       {/* Section toolbar (top-left) */}
-      <SectionToolbar
-        sec={sec}
-        canRemove={canRemove}
-        accent={accent}
-        active={active}
-        isSelected={isSelected}
-        onSelectSection={onSelectSection}
-        onSetSectionLayout={onSetSectionLayout}
-        onRemoveSection={onRemoveSection}
-      />
+      {showChrome && (
+        <SectionToolbar
+          sec={sec}
+          canRemove={canRemove}
+          accent={accent}
+          active={active}
+          isSelected={isSelected}
+          onSelectSection={onSelectSection}
+          onSetSectionLayout={onSetSectionLayout}
+          onRemoveSection={onRemoveSection}
+        />
+      )}
 
-      {/* Grid cells overlay */}
-      {tpl?.cells &&
+      {/* Grid cells overlay — hidden alongside section chrome so the
+          canvas reads as a clean live page. */}
+      {showChrome && tpl?.cells &&
         tpl.cells.map((c, i) => {
           const isDrop = dropOnSection && dropTarget?.cellIndex === i;
           const isCellSelected =
@@ -4629,16 +5014,16 @@ function SectionView({
                 background: isDrop
                   ? 'rgba(59,130,246,0.08)'
                   : isCellSelected
-                  ? 'rgba(59,130,246,0.04)'
-                  : 'rgba(245,158,11,0.04)',
+                  ? 'rgba(59,130,246,0.045)'
+                  : 'rgba(59,130,246,0.018)',
                 border: `${isCellSelected ? '2px' : '1px'} ${isCellSelected ? 'solid' : 'dashed'} ${
-                  isDrop || isCellSelected ? accent : 'rgba(245,158,11,0.45)'
+                  isDrop || isCellSelected ? accent : 'rgba(59,130,246,0.22)'
                 }`,
                 cursor: 'pointer',
                 pointerEvents: 'auto',
                 zIndex: 1,
                 boxSizing: 'border-box',
-                transition: `background 160ms ${EASE.out}, border-color 160ms ${EASE.out}`
+                transition: `background 200ms ${EASE.out}, border-color 200ms ${EASE.out}`
               }}
             >
               <div
@@ -4650,11 +5035,14 @@ function SectionView({
                   fontWeight: 700,
                   letterSpacing: '0.08em',
                   textTransform: 'uppercase',
-                  color: isDrop || isCellSelected ? '#fff' : '#b45309',
-                  background: isDrop || isCellSelected ? accent : '#fff',
-                  padding: '2px 6px',
-                  borderRadius: 4,
-                  boxShadow: '0 1px 3px rgba(0,0,0,0.06)',
+                  color: isDrop || isCellSelected ? '#fff' : T.text3,
+                  background: isDrop || isCellSelected ? accent : T.glassStrong,
+                  backdropFilter: T.blur,
+                  WebkitBackdropFilter: T.blur,
+                  border: `1px solid ${isDrop || isCellSelected ? accent : T.glassBorder}`,
+                  padding: '2px 7px',
+                  borderRadius: 999,
+                  boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
                   pointerEvents: 'none'
                 }}
               >
@@ -4665,12 +5053,13 @@ function SectionView({
         })}
 
       {/* Free drop preview */}
-      {dropOnSection && dropTarget?.cellIndex == null && !dropTarget?.containerId && !tpl && (
+      {showChrome && dropOnSection && dropTarget?.cellIndex == null && !dropTarget?.containerId && !tpl && (
         <FreeDropPreview localY={dropTarget.localY} accent={accent} />
       )}
 
-      {/* Gridlines overlay (free layout) */}
-      {showGridlines && !tpl && (
+      {/* Gridlines overlay (free layout) — purely an editing aid, hide
+          when chrome is off. */}
+      {showChrome && showGridlines && !tpl && (
         <GridlineOverlay
           sec={sec}
           mode={mode}
@@ -4696,9 +5085,11 @@ function SectionView({
             onUpdateElementProps={onUpdateElementProps}
             onMeasureHeight={(h) => onMeasureHeight(sec.id, c.id, h)}
             onMeasureHeightRaw={onMeasureHeight}
+            onMeasureNaturalHeight={onMeasureNaturalHeight}
             onRegisterRef={onRegisterElementRef}
             canvasWidth={canvasWidth}
             refWidth={refWidth}
+            showChrome={showChrome}
             isDropTarget={
               c.archetype === 'container' &&
               dropTarget?.sectionId === sec.id &&
@@ -4706,8 +5097,13 @@ function SectionView({
             }
           />
         ))}
+      </div>
+      {/* /inner clipping box */}
 
-      {/* Bottom handle + add-section */}
+      {/* Bottom handle + add-section — lives on the outer (non-clipping)
+          wrapper so the "+" button at bottom:-14 stays visible below the
+          section's bottom edge. */}
+      {showChrome && (
       <div
         onMouseEnter={() => setHoverBottom(true)}
         onMouseLeave={() => setHoverBottom(false)}
@@ -4773,17 +5169,17 @@ function SectionView({
             bottom: -14,
             left: '50%',
             zIndex: 100,
-            border: `1px solid ${accent}`,
-            background: '#fff',
-            color: accent,
+            border: 'none',
+            background: accent,
+            color: '#fff',
             cursor: 'pointer',
-            padding: '4px 12px',
+            padding: '6px 14px',
             borderRadius: 999,
             fontSize: 10,
-            fontWeight: 700,
+            fontWeight: 600,
             letterSpacing: '0.10em',
             textTransform: 'uppercase',
-            boxShadow: '0 4px 14px rgba(59,130,246,0.20)',
+            boxShadow: '0 4px 14px rgba(59,130,246,0.30), inset 0 1px 0 rgba(255,255,255,0.18)',
             opacity: hoverBottom || isSelected ? 1 : 0,
             transform:
               'translateX(-50%) ' +
@@ -4796,6 +5192,7 @@ function SectionView({
           + Add Section
         </button>
       </div>
+      )}
     </div>
   );
 }
@@ -5011,13 +5408,21 @@ function CanvasElement({
   onUpdateElementProps,
   onMeasureHeight,
   onMeasureHeightRaw,
+  onMeasureNaturalHeight,
   onRegisterRef,
   canvasWidth,
   refWidth,
+  showChrome = true,
   isDropTarget
 }) {
   const beh = RESPONSIVE_BEHAVIORS[el.behavior];
   const autoHeight = beh.heightUnit === 'auto';
+  // Text + button bounding boxes always hug their wrapped content, even
+  // when the responsive package specifies a frozen height. We measure the
+  // natural content height through a side channel (`onMeasureNaturalHeight`)
+  // and `layoutChildren` grows the resolved heightPx to match — so anchored
+  // siblings stack below the rendered bottom and the box never clips text.
+  const hugsContent = el.archetype === 'text' || el.archetype === 'button';
   const isSelected =
     typeof selected === 'boolean'
       ? selected
@@ -5045,17 +5450,34 @@ function CanvasElement({
   }, [el.id, onRegisterRef]);
 
   React.useEffect(() => {
-    if (!autoHeight || !ref.current || !onMeasureHeight) return;
+    if (!ref.current) return;
+    if (!autoHeight && !hugsContent) return;
     const node = ref.current;
     const ro = new ResizeObserver((entries) => {
       for (const entry of entries) {
         const h = entry.contentRect.height;
-        if (Math.abs(h - el.heightPx) > 1) onMeasureHeight(h);
+        if (autoHeight && onMeasureHeight && Math.abs(h - el.heightPx) > 1) {
+          onMeasureHeight(h);
+        }
+        // Text/button: report measured height to the App's side-channel so
+        // layoutChildren can grow the bounding box to fit wrapped content.
+        // We always report (not just when grown) so shrinking content also
+        // shrinks the box back down toward the spec floor.
+        if (hugsContent && onMeasureNaturalHeight) {
+          onMeasureNaturalHeight(el.id, h);
+        }
       }
     });
     ro.observe(node);
     return () => ro.disconnect();
-  }, [autoHeight, onMeasureHeight, el.heightPx]);
+  }, [autoHeight, hugsContent, onMeasureHeight, onMeasureNaturalHeight, el.id, el.heightPx]);
+
+  // Stop reporting when this element unmounts so the natural-heights map
+  // doesn't accumulate stale entries from deleted elements.
+  React.useEffect(() => {
+    if (!hugsContent || !onMeasureNaturalHeight) return;
+    return () => onMeasureNaturalHeight(el.id, 0);
+  }, [hugsContent, onMeasureNaturalHeight, el.id]);
 
   const isContainer = el.archetype === 'container';
   // Nested children render as descendants of this container so they inherit
@@ -5066,10 +5488,36 @@ function CanvasElement({
     [isContainer, sec.children, el.id]
   );
 
+  // Hover affordance — the wrapper covers the FULL element box (matches
+  // selection bounds), so this 1px outline always wraps the whole thing
+  // rather than hugging just the inner content.
+  const [hover, setHover] = React.useState(false);
+
+  // Resolve the visible outline. Selected wins (the MoveableController
+  // overlay paints the selected outline + handles, but we keep this 1px
+  // transparent slot so the box doesn't reflow). Drop-target gets the
+  // dashed accent. Hover is a thin accent hairline.
+  let outline = '1px solid transparent';
+  let boxShadow = 'none';
+  let bg;
+  // Drop-target highlight stays even with chrome off (it's interaction
+  // feedback during a drag), but the passive hover outline is suppressed —
+  // we want the canvas to look like a clean live page.
+  if (isDropTarget) {
+    outline = `2px dashed ${accent}`;
+    boxShadow = `0 0 0 6px ${accent}22`;
+    bg = `${accent}0F`;
+  } else if (hover && !isSelected && showChrome) {
+    outline = `1px solid ${accent}66`;
+    boxShadow = `0 0 0 3px ${accent}1A`;
+  }
+
   return (
     <div
       ref={setRef}
       data-rm-element={el.id}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
       onMouseDown={(e) => {
         if (!isSelected) {
           e.stopPropagation();
@@ -5085,16 +5533,20 @@ function CanvasElement({
         left: el.leftPx,
         top: el.topPx,
         width: el.widthPx,
-        height: autoHeight ? 'auto' : el.heightPx,
-        minHeight: autoHeight ? 0 : undefined,
+        // Text + button always render with `height: auto` so the box hugs
+        // its measured content; layoutChildren has already pushed el.heightPx
+        // up to that natural height (or the user's spec, whichever is taller),
+        // and we use that as the floor via minHeight.
+        height: autoHeight || hugsContent ? 'auto' : el.heightPx,
+        minHeight: autoHeight ? 0 : hugsContent ? el.heightPx : undefined,
         cursor: 'pointer',
         userSelect: 'none',
-        outline: isDropTarget ? `2px dashed ${accent}` : '1px solid transparent',
+        outline,
         outlineOffset: 1,
-        boxShadow: isDropTarget ? `0 0 0 6px ${accent}22` : 'none',
-        background: isDropTarget ? `${accent}11` : undefined,
+        boxShadow,
+        background: bg,
         borderRadius: 6,
-        transition: 'outline 160ms ease-out, box-shadow 160ms ease-out, background 160ms ease-out',
+        transition: `outline 200ms ${EASE.out}, box-shadow 200ms ${EASE.out}, background 200ms ${EASE.out}`,
         // Per-element layering: zIndex 0 by default; user-controllable from
         // the inspector (Front/Back/Forward/Backward + numeric Z field).
         // Selected gets +1 to keep its handles visible against same-z peers.
@@ -5144,9 +5596,11 @@ function CanvasElement({
                 : undefined
             }
             onMeasureHeightRaw={onMeasureHeightRaw}
+            onMeasureNaturalHeight={onMeasureNaturalHeight}
             onRegisterRef={onRegisterRef}
             canvasWidth={canvasWidth}
             refWidth={refWidth}
+            showChrome={showChrome}
             isDropTarget={
               child.archetype === 'container' &&
               dropTarget?.sectionId === sec.id &&
@@ -5155,13 +5609,16 @@ function CanvasElement({
           />
         ))}
 
-      {isSelected && (
+      {isSelected && showChrome && (
         <div
           data-no-drag
           style={{
             position: 'absolute',
             top: -22,
             left: 0,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 6,
             fontSize: 9,
             fontWeight: 700,
             letterSpacing: '0.08em',
@@ -5172,10 +5629,18 @@ function CanvasElement({
             borderRadius: 4,
             boxShadow: '0 2px 6px rgba(59,130,246,0.30)',
             pointerEvents: 'none',
-            zIndex: 50
+            zIndex: 50,
+            whiteSpace: 'nowrap',
+            fontFamily: sysFont
           }}
         >
-          {ARCHETYPES[el.archetype].label} · {beh.label}
+          <span>{ARCHETYPES[el.archetype].label} · {beh.label}</span>
+          {/* Live size readout — updates every layout pass (drag, resize,
+              canvas-width change, content reflow), so the user always sees
+              the actual rendered W×H in pixels. */}
+          <span style={{ opacity: 0.78, fontWeight: 600, letterSpacing: '0.04em' }}>
+            {Math.round(el.widthPx)} × {Math.round(el.heightPx)}
+          </span>
         </div>
       )}
     </div>
@@ -5232,7 +5697,10 @@ function TextWidget({ el, onUpdateProps, selected, autoHeight, fontScale = 1 }) 
       }}
       style={{
         width: '100%',
-        height: autoHeight ? 'auto' : '100%',
+        // Always grow with content: the wrapper now uses `height: auto` for
+        // text (see CanvasElement) so we let the inner div be content-sized.
+        // The wrapper's minHeight enforces the user's spec height as a floor.
+        height: 'auto',
         padding: '2px 4px',
         boxSizing: 'border-box',
         fontFamily: p.fontFamily || 'Inter',
@@ -5244,7 +5712,7 @@ function TextWidget({ el, onUpdateProps, selected, autoHeight, fontScale = 1 }) 
         textAlign: p.textAlign || 'left',
         cursor: editing ? 'text' : 'move',
         outline: 'none',
-        overflow: autoHeight ? 'visible' : 'hidden',
+        overflow: 'visible',
         wordBreak: 'break-word',
         whiteSpace: 'normal',
         background: editing ? 'rgba(59,130,246,0.04)' : 'transparent',
@@ -5351,21 +5819,10 @@ function ContainerWidget({ el, autoHeight, hasChildren }) {
         background: p.background,
         border: `1px dashed ${p.borderColor}`,
         borderRadius: (p.borderRadius || 12) + 'px',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        color: T.text3,
-        fontSize: 10,
-        fontWeight: 600,
-        letterSpacing: '0.10em',
-        textTransform: 'uppercase',
-        padding: 12,
         boxSizing: 'border-box',
         pointerEvents: 'none'
       }}
-    >
-      {hasChildren ? '' : 'Container'}
-    </div>
+    />
   );
 }
 

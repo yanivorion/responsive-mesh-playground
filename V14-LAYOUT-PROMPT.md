@@ -103,7 +103,11 @@ const LAYOUT = {
           x: 80,                               // px at refWidth — left offset (or 0 inside cell/parent)
           y: 120,                              // px at refWidth — top offset (from anchor bottom / section top / parent top)
           w: 640,                              // px at refWidth — width (use 'auto' for hug)
-          h: 140,                              // px at refWidth — height (use 'auto' for hug)
+          h: 140,                              // px at refWidth — height (use 'auto' for hug / wrap text)
+          z: 0,                                // optional integer — visual stacking within the section.
+                                               // Higher z renders on top of lower z. Use for hero copy that
+                                               // overlaps an image (z: 2 on copy, z: 0 on image), badges on
+                                               // cards, decorative shapes behind text. Default 0.
           props: {
             text: 'Build with intent.',
             fontFamily: 'Inter',
@@ -158,14 +162,25 @@ This is THE most important table. Pick the wrong behavior and the element won't 
 | `fixedHeight`         | vw         | px          | Width is a vw fraction (full-bleed bands). Use for full-width images at fixed strip height.|
 | `stretch`             | pct        | pct         | Fills 100% of its parent container or section. Background fills, image-fills-card.         |
 | `hug`                 | auto       | auto        | Sizes to its content. Default for `text`. Required when `w: 'auto'` or `h: 'auto'`.        |
-| `cellFit`             | pct        | auto        | 100% of grid cell width, height grows with content. Default text/container behavior in cells.|
+| `wrap`                | spx        | auto        | Width scales with the canvas (forcing text to re-wrap), height grows to fit the wrapped content. **Use this for body copy that should reflow as the viewport changes** — the bounding box auto-grows in height as the canvas narrows. Also the default for cell- and container-mounted text/containers. Valid on `container` (auto-grows around its children) and `button` (rare). |
 
 ### Allowed behavior per archetype (the playground will REJECT mismatches)
 
-- `container`: `scaleProportionally`, `relativeWidth`, `fixed`, `stretch`, `cellFit`
+- `container`: `scaleProportionally`, `relativeWidth`, `fixed`, `stretch`, `wrap`
 - `image`: `scaleProportionally`, `relativeWidth`, `fixed`, `stretch`
-- `text`: `scaleProportionally`, `fixed`, `hug`, `cellFit`
-- `button`: `scaleProportionally`, `relativeWidth`, `fixed`, `hug`
+- `text`: `scaleProportionally`, `fixed`, `hug`, `wrap`
+- `button`: `scaleProportionally`, `relativeWidth`, `fixed`, `hug`, `wrap`
+
+### Margin units follow behavior automatically
+
+Every element has a `top` and `left` margin (your `x` / `y` numbers). The playground picks the unit for those margins from the element's behavior so you almost never need to think about it:
+
+| Behavior              | Default margin unit |
+|-----------------------|---------------------|
+| `scaleProportionally` | **SPX** (margins scale with the canvas, just like the element) |
+| `wrap` / `fixed` / `fixedHeight` / `relativeWidth` / `hug` / `stretch` | **PX** (margins stay locked at a fixed pixel distance from the parent corner) |
+
+You write `x` / `y` as **px at refWidth**; the playground stores them in the unit above. The user can override per-axis from the inspector (SPX / PX / %). This means a `scaleProportionally` element with `x: 96, y: 32` will move closer to the section corner as the canvas shrinks, while a `fixed` button with the same `x: 96, y: 32` will stay 96/32 px from its parent at every canvas size — which is exactly what you want.
 
 ## Section Behaviors
 
@@ -179,29 +194,37 @@ This is THE most important table. Pick the wrong behavior and the element won't 
 
 ## Grid Layouts (the only allowed `layout` values)
 
-| Layout   | Cells | Cell coordinates (x, y, w, h in 0..1)                                                                  |
-|----------|-------|--------------------------------------------------------------------------------------------------------|
-| `free`   | n/a   | No grid; children float-position. Use for hero, complex art-directed sections.                          |
-| `1col`   | 1     | (0,0,1,1)                                                                                              |
-| `2col`   | 2     | (0,0,0.5,1), (0.5,0,0.5,1)                                                                             |
-| `3col`   | 3     | thirds                                                                                                 |
-| `4col`   | 4     | quarters                                                                                               |
-| `2row`   | 2     | (0,0,1,0.5), (0,0.5,1,0.5)                                                                             |
-| `1+2`    | 3     | full-width top + two halves below                                                                      |
-| `2+1`    | 3     | two halves on top + full-width below                                                                   |
-| `asym`   | 2     | (0,0,⅓,1), (⅓,0,⅔,1) — one-third / two-thirds split                                                    |
-| `mosaic` | 3     | left half + two stacked quarters on right                                                              |
+| Layout      | Cells | Cell coordinates (x, y, w, h in 0..1)                                                              |
+|-------------|-------|----------------------------------------------------------------------------------------------------|
+| `free`      | n/a   | No grid; children float-position. Use for hero, complex art-directed sections.                      |
+| `1col`      | 1     | (0,0,1,1)                                                                                          |
+| `2col`      | 2     | (0,0,0.5,1), (0.5,0,0.5,1)                                                                         |
+| `3col`      | 3     | thirds                                                                                             |
+| `4col`      | 4     | quarters                                                                                           |
+| `2row`      | 2     | (0,0,1,0.5), (0,0.5,1,0.5)                                                                         |
+| `1+2`       | 3     | full-width top + two halves below                                                                  |
+| `2+1`       | 3     | two halves on top + full-width below                                                               |
+| `asym`      | 2     | (0,0,0.4,1), (0.4,0,0.6,1) — **40 / 60 sidebar + main** (the docs / dashboard sidebar layout)      |
+| `asym-1-2`  | 2     | (0,0,⅓,1), (⅓,0,⅔,1) — one-third / two-thirds (editorial byline + body copy)                      |
+| `mosaic`    | 3     | left half + two stacked quarters on right                                                          |
 
 **Rule:** Use grid layouts for predictable column structures (feature grids, card rows, footer columns). Use `free` for hero compositions, magazine spreads, anything art-directed.
 
 ## Addressing Modes (mutually exclusive)
 
-A child is positioned in exactly **one** of four ways. Pick one and stick to it for that child:
+Every child has a "container" (the thing whose top-left corner its `x`/`y` are measured from). The four addressing modes pick which container that is — but **`anchor` now stacks on top of any of the first three**, not as a separate mode of its own:
 
-1. **Free** (no `cell`, no `parent`, no `anchor`): `x`/`y` are offsets from the section's top-left. In Mesh mode the playground may auto-snap the element to anchor on the first qualifying element above; in No-Mesh mode it's pinned to the section top.
-2. **Cell** (`cell: N`): the child fills inside grid cell N (0-indexed). `x`/`y` become local offsets within the cell. Required `behavior` is usually `cellFit` (text/container) or `stretch` (image).
-3. **Parent** (`parent: 'someId'`): the child nests INSIDE a container archetype with that id. `x`/`y` are px offsets within the parent (converted to pct internally). Used for icon-on-card, badge-on-image, label-on-tile.
-4. **Anchor** (`anchor: 'someId'`): mesh-only relationship. `y` is the px GAP below the bottom of the anchor element. The child re-flows vertically as the anchor's height changes (e.g. typography reflow at narrower widths).
+1. **Free** (no `cell`, no `parent`): the section is the container. `x`/`y` are offsets from the section's top-left.
+2. **Cell** (`cell: N`): grid cell N (0-indexed) is the container. `x`/`y` are local offsets within the cell. Required `behavior` is usually `wrap` (auto-growing text/cards) or `stretch` (image fills cell).
+3. **Parent** (`parent: 'someId'`): a container archetype with that id is the container. `x`/`y` are px offsets within the parent (converted to pct internally). Used for icon-on-card, badge-on-image, label-on-tile.
+4. **Anchor** (`anchor: 'someId'`, optional add-on): instead of measuring `y` from the container's top, measure it from the **bottom of the anchor element**. `y` becomes the px GAP below that element. The child re-flows vertically as the anchor's height changes.
+
+   **Mesh anchors work everywhere now** — at the section level (free children), inside grid cells, and inside containers. The rule is just that the anchor target must live in the **same scope** as the child:
+   - Free child anchoring free child  → both omit `cell`/`parent`. Anchor target is a sibling free child.
+   - Cell child anchoring cell child   → both share the same `cell: N`. Anchor target is a sibling cell child.
+   - Parent child anchoring parent child → both share the same `parent: 'X'`. Anchor target is a sibling inside the same container.
+
+   You may NOT anchor across scopes (e.g. a `parent: 'card-1'` child cannot `anchor:` a free child in the section). Keep chains scoped to one container.
 
 ### How Mesh actually works — the push-cascade
 
@@ -233,9 +256,13 @@ So when an element is `anchor: 'X'` with `y: 32`, its rail is *always* 32px belo
 
 6. **Anchoring across columns is allowed and powerful.** A CTA can `anchor: 'left-body'` even though the CTA sits to the right — the y will still ride the left body's growth.
 
-7. **`parent` and `cell` are NOT chained.** Children of a container or grid cell are positioned inside that parent's local coordinate system; no rails apply to them. Use `anchor` only on free-positioned children. (You CAN anchor INSIDE a container — set both `parent: 'X'` and `anchor: 'Y'` where Y is also a child of X.)
+7. **`parent` and `cell` chains are scoped to that container.** Children of a container or grid cell get their own mesh — set both `parent: 'X'` (or `cell: N`) AND `anchor: 'Y'` where Y is a sibling inside the same container. The push-cascade then runs entirely inside that container, and the container itself (if behavior is `wrap` or `auto`) auto-grows around the chain. Building cards as `container` + nested anchor chain is the cleanest pattern in V14.
 
-8. **A layout with zero `anchor:` chains does not exercise Mesh.** It's a static 1280 mockup that breaks at every other viewport. Every V14 layout MUST contain at least one anchor chain ≥ 3 deep, ideally several.
+8. **A layout with zero `anchor:` chains does not exercise Mesh.** It's a static 1280 mockup that breaks at every other viewport. Every V14 layout MUST contain at least one anchor chain ≥ 3 deep, ideally several. Hero stacks, card content stacks, and editorial body copy are all natural places.
+
+9. **No-Mesh mode (`meta.mode: 'noMesh'`) ignores anchors entirely.** Every child docks to the top-left of its container (section / cell / parent) using its raw `x` / `y`. Anchor relationships are not evaluated; elements can overlap freely (a `fixed`-margin element sitting on top of a scaling one will visibly collide as the canvas changes — that's the whole point of the mode, it's a "no safety net" baseline you toggle to compare against Mesh). Design as if anchors didn't exist, and let the cascade kick in only when the user toggles Mesh on.
+
+10. **Containers do NOT clip their children.** A container's `overflow` is always `visible`. If you give a container `behavior: 'wrap'` it will auto-grow in height to enclose anything anchored inside it. If you give it `behavior: 'scaleProportionally'` and an anchor chain inside grows past its `h`, the chain visibly overflows the box — that's a sign you should switch the container to `wrap`.
 
 ### Reading the gridline overlay
 When the user toggles "Show Gridlines", each free element renders two horizontal lines:
@@ -261,6 +288,8 @@ Only ship props the playground actually understands. Unknown props are silently 
   textAlign: 'left'                      // 'left' | 'center' | 'right'
 }
 ```
+
+**Body copy almost always wants `behavior: 'wrap'`** so the bounding box scales width with the canvas (forcing the text to re-wrap onto more lines) while the height auto-grows to fit the wrapped lines. `scaleProportionally` keeps the *box* the same shape and shrinks the font with it — useful for hero headlines, less so for paragraphs. `hug` is for short labels.
 
 ### `button` props
 ```js
@@ -292,6 +321,15 @@ Only ship props the playground actually understands. Unknown props are silently 
   borderRadius: 12
 }
 ```
+
+**Containers never clip.** `overflow` is always `visible`. To make a card auto-grow around its content, give the container `behavior: 'wrap'`. Combine that with an anchor chain of children inside the container and the whole card behaves like a single growing unit on canvas resize.
+
+### `z` (visual layering)
+Top-level field on any child. Integer; default `0`. Higher value renders on top. Use sparingly:
+- Hero copy overlapping a hero image: image `z: 0`, copy `z: 2`.
+- Decorative shape behind a stat number: shape `z: 0`, number `z: 1`.
+- Badge sitting on top of a card image: card `z: 0`, image `z: 0`, badge `z: 3`.
+Don't ladder z values across the whole layout — keep them local to a specific overlap.
 
 ---
 
@@ -330,7 +368,7 @@ Coordinates are **unitless numbers in pixels**. Don't write percentages, em, or 
 ```javascript
 { archetype: 'text',   behavior: 'stretch' }     // text doesn't allow stretch
 { archetype: 'image',  behavior: 'hug' }         // image doesn't allow hug
-{ archetype: 'button', behavior: 'cellFit' }     // button doesn't allow cellFit
+{ archetype: 'button', behavior: 'stretch' }     // button doesn't allow stretch
 ```
 **RULE:** Re-check the Responsive Behavior Reference table. Every `(archetype, behavior)` pair must be in the allowed list.
 
@@ -343,7 +381,7 @@ Coordinates are **unitless numbers in pixels**. Don't write percentages, em, or 
 children: [
   { id: 'card', archetype: 'container', behavior: 'scaleProportionally',
     x: 0, y: 0, w: 400, h: 300, props: { background: '#fff' } },
-  { archetype: 'text', behavior: 'cellFit', parent: 'card',
+  { archetype: 'text', behavior: 'wrap', parent: 'card',
     x: 24, y: 24, w: 352, h: 80,
     props: { text: 'Card title' } }
 ]
@@ -381,7 +419,7 @@ The element will render off-canvas and skew layout-min calculations.
 {
   layout: '3col',
   children: [
-    { archetype: 'text', behavior: 'cellFit', cell: 0,
+    { archetype: 'text', behavior: 'wrap', cell: 0,
       x: 24, y: 32, w: 0, h: 0,                  // x/y are local pad inside the cell
       props: { text: 'Column 1' } }
   ]
@@ -392,7 +430,7 @@ The element will render off-canvas and skew layout-min calculations.
 ```javascript
 { archetype: 'text', cell: 1, x: 640, y: 200 }   // x: 640 is the cell's left edge already; this double-offsets
 ```
-**RULE:** When `cell` is set, `x`/`y` are PADDING from the cell's top-left. For most cell drops use `x: 0, y: 0` plus `behavior: 'cellFit'` and let the cell sizing handle the rest.
+**RULE:** When `cell` is set, `x`/`y` are PADDING from the cell's top-left. For most cell drops use `x: 0, y: 0` plus `behavior: 'wrap'` and let the cell sizing handle the rest.
 
 ---
 
@@ -453,16 +491,16 @@ A boutique desktop layout has **density**. Hero sections have eyebrow + headline
 
 ### ✅ CORRECT — card as a container with nested content
 ```javascript
-{ id: 'card1', archetype: 'container', behavior: 'cellFit', cell: 0,
+{ id: 'card1', archetype: 'container', behavior: 'wrap', cell: 0,
   x: 16, y: 16, w: 384, h: 280,
   props: { background: '#FFFFFF', borderColor: '#E4E4E7', borderRadius: 12 } },
 { id: 'card1-img', archetype: 'image', behavior: 'stretch', parent: 'card1',
   x: 0, y: 0, w: 384, h: 160,
   props: {} },                                     // image source comes from the pool
-{ archetype: 'text',  behavior: 'cellFit', parent: 'card1',
+{ archetype: 'text',  behavior: 'wrap', parent: 'card1',
   x: 20, y: 176, w: 344, h: 32,
   props: { text: 'Atelier no. 7', fontSize: 18, fontWeight: '500' } },
-{ archetype: 'text',  behavior: 'cellFit', parent: 'card1',
+{ archetype: 'text',  behavior: 'wrap', parent: 'card1',
   x: 20, y: 216, w: 344, h: 48,
   props: { text: 'A study in restraint and material honesty.',
            fontSize: 13, fontWeight: '400', color: '#71717A' } }
@@ -508,6 +546,9 @@ REJECT and rewrite if the layout has ANY of:
 11. ❌ Cell-mounted children with section-global x/y instead of cell-local offsets
 12. ❌ Loud gradients, bold weights >500, or non-monochromatic palettes (without explicit user request). Note: `image` archetypes never need gradient/src/caption — the playground supplies the photo automatically.
 13. ❌ Missing `id` on elements that are anchored or nested into
+14. ❌ `anchor` target lives in a different scope from the child (e.g. a `parent: 'card-1'` child anchoring a free child in the section, or a `cell: 1` child anchoring a `cell: 0` child)
+15. ❌ Body-copy `text` written with `behavior: 'scaleProportionally'` and a fixed `h` so the text gets clipped at narrow widths — should be `behavior: 'wrap'` with a generous `h`
+16. ❌ Card built as a `container` with a fixed `h` and children that overflow it at narrower viewports — switch the container to `behavior: 'wrap'`
 
 ---
 
@@ -538,11 +579,13 @@ Sidebar nav (left) + main article content (right) — use `asym` layout. Heavy m
 
 ## 8. Stress (`category: 'stress'`)
 Designed to expose Mesh-vs-No-Mesh edge cases:
-- One section with a deep anchor chain (≥ 6 elements chained vertically)
-- One section with `auto` height + a hug text that will reflow (long content, narrow column)
-- One section mixing free elements with cell-mounted children
-- One section with 3-level container nesting (container → container → element)
-- One section using `fixedHeight` with `vw` width images intentionally going edge-to-edge
+- One section with a deep anchor chain (≥ 6 elements chained vertically) at the section (free) level.
+- One section with `auto` height + at least one `wrap` text that will reflow (long copy in a narrow column) — toggle Mesh on/off and the cascade should visibly redistribute the page height.
+- One section mixing free elements with cell-mounted children, AND an anchor chain inside one of the cells (cell-scoped Mesh).
+- One section with a `wrap` container holding an internal anchor chain (container-scoped Mesh) so the container itself auto-grows.
+- One section mixing margin-unit personalities deliberately — pair a `scaleProportionally` element (SPX margins) with an adjacent `fixed` element (PX margins). In Mesh mode they ride a shared rail and stay clean; in No-Mesh mode they collide as the canvas narrows. That's the demo.
+- One section using `fixedHeight` with `vw`-width images intentionally going edge-to-edge.
+- At least one intentional `z` overlap (e.g. headline copy with `z: 2` over a hero image at `z: 0`).
 
 ---
 
@@ -591,7 +634,7 @@ For every section with stacked vertical content, identify the chain root and wri
 - Open with `meta`.
 - Section by section, write children in render order (parents before nested, anchor sources before anchor consumers).
 - Use ids only on elements that are referenced.
-- Default to `scaleProportionally` for hero text and images, `fixed` for buttons, `cellFit` for cell-mounted text/containers, `stretch` for cell-mounted images.
+- Default to `scaleProportionally` for hero text and images, `fixed` for buttons, `wrap` for cell-mounted text/containers (auto-grows around content), `stretch` for cell-mounted images.
 
 ## 5. Self-Validate Against the Rejection Criteria
 Before delivering, mentally walk the 13 rejection criteria. Fix any violations.
@@ -650,6 +693,9 @@ Before delivering ANY layout (single or bulk), verify each of these:
 - [ ] At least one explicit mesh anchor chain (≥ 3 elements deep)
 - [ ] Hero section uses anchor chain (eyebrow → headline → sub → cta)
 - [ ] Anchor `y` values are realistic gaps (typically 16–48 px)
+- [ ] Card-style `container`s use `behavior: 'wrap'` and an internal anchor chain when their content stack is more than 2 elements deep
+- [ ] Body copy / long-form text uses `behavior: 'wrap'` so the box grows with the wrapped lines
+- [ ] Anchor targets live in the same scope as the anchoring child (no cross-container chains)
 
 ✅ **Density:**
 - [ ] Total children ≥ 25 across all sections
